@@ -1,51 +1,55 @@
 package org.zalando.nakadi;
 
+import java.io.Closeable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentHashMap.KeySetView;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.Closeable;
-import java.util.HashSet;
-import java.util.Set;
-
 public class ShutdownHooks {
 
-    private static final Set<Runnable> HOOKS = new HashSet<>();
+    private static final KeySetView<Runnable, Boolean> HOOKS = ConcurrentHashMap.newKeySet();
+    private static final KeySetView<Runnable, Boolean> DONE_HOOKS = ConcurrentHashMap.newKeySet();
     private static final Logger LOG = LoggerFactory.getLogger(ShutdownHooks.class);
 
     static {
         Runtime.getRuntime().addShutdownHook(new Thread(ShutdownHooks::onNodeShutdown));
     }
-
+    
     private static void onNodeShutdown() {
-        boolean haveHooks = true;
-        while (haveHooks) {
-            final Runnable hook;
-            synchronized (HOOKS) {
-                hook = HOOKS.isEmpty() ? null : HOOKS.iterator().next();
-                HOOKS.remove(hook);
-                haveHooks = !HOOKS.isEmpty();
-            }
-            if (null != hook) {
-                try {
-                    hook.run();
-                } catch (final RuntimeException ex) {
-                    LOG.warn("Failed to call on shutdown hook for {}", hook, ex);
-                }
-            }
+        HOOKS.forEach(ShutdownHooks::runSafely);
+    }
+
+    private static void runSafely(final Runnable hook) {
+        final boolean done = DONE_HOOKS.contains(hook);
+        if (done) {
+            return;
+        }
+
+        final boolean claimed = DONE_HOOKS.add(hook);
+        if (!claimed) {
+            return;
+        }
+
+        runWithExceptionLogging(hook);
+    }
+
+    private static void runWithExceptionLogging(Runnable hook) {
+        try {
+            hook.run();
+        } catch (final RuntimeException ex) {
+            LOG.warn("Failed to call on shutdown hook for {}", hook, ex);
         }
     }
 
     public static Closeable addHook(final Runnable runnable) {
-        synchronized (HOOKS) {
-            HOOKS.add(runnable);
-        }
+        HOOKS.add(runnable);
         return () -> removeHook(runnable);
     }
 
     private static void removeHook(final Runnable runnable) {
-        synchronized (HOOKS) {
-            HOOKS.remove(runnable);
-        }
+        HOOKS.remove(runnable);
     }
+
 
 }
